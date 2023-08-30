@@ -1,0 +1,45 @@
+name: CI
+on: [ push ]
+jobs:
+  linux-containers:
+    runs-on: ubuntu-latest
+    container:
+      image: debian:stable
+    steps:
+    - name: setup
+      run: |
+        apt-get update
+        apt-get -y install curl gnupg lsb-release
+        curl https://www.postgresql.org/media/keys/ACCC4CF8.asc | apt-key add -
+        echo "deb http://apt.postgresql.org/pub/repos/apt/ $(lsb_release -cs)-pgdg main" | tee /etc/apt/sources.list.d/pgdg.list
+        apt-get update
+        pkgs="autoconf automake ca-certificates cpio libc-ares-dev libevent-dev libssl-dev libsystemd-dev libtool make pandoc postgresql-$PGVERSION pkg-config python3 python3-pip python3-venv sudo iptables"
+        case $CC in clang) pkgs="$pkgs clang";; esac
+        if [ x"$ENABLE_VALGRIND" = x"yes" ]; then pkgs="$pkgs valgrind"; fi
+        if [ x"$use_scan_build" = x"yes" ]; then pkgs="$pkgs clang-tools"; fi
+        apt-get -y install $pkgs
+        python3 -m venv /venv
+        /venv/bin/pip install -r requirements.txt
+        useradd user
+        chown -R user .
+        echo 'user ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers
+    - name: build
+      run: |
+        su user -c "./autogen.sh"
+        su user -c "${use_scan_build:+scan-build} ./configure --prefix=$HOME/install --enable-cassert --enable-werror --without-cares --with-systemd $configure_args"
+        su user -c "${use_scan_build:+scan-build} make -j4"
+    - name: test
+      run: source /venv/bin/activate && su user -c "PATH=/usr/lib/postgresql/${PGVERSION}/bin:$PATH make -j4 check CONCURRENCY=4"
+    - name: install
+      run: make -j4 install
+    - name: dist
+      run: |
+        make -j4 dist
+        PACKAGE_VERSION=$(sed -n 's/PACKAGE_VERSION = //p' config.mak)
+        tar -x -v -f pgbouncer-${PACKAGE_VERSION}.tar.gz
+        cd pgbouncer-${PACKAGE_VERSION}/
+        ./configure --prefix=$HOME/install2 --enable-werror --without-cares $configure_args
+        make -j4
+        make -j4 install
+
+
